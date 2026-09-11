@@ -36,13 +36,21 @@ struct RootTabView: View {
 
         let store = ReceiptStore(modelContext: ModelContext(modelContainer))
         store.seedSampleDataIfNeeded()
-        _store = State(initialValue: store)
 
         // A separate ModelContext from ReceiptStore's — Product/Purchase
         // have no SwiftData relationship back to Receipt/ReceiptItem, so
         // there's no need for the two stores to share one.
         let productStore = ProductStore(modelContext: ModelContext(modelContainer))
         productStore.seedSampleDataIfNeeded()
+
+        // The one place the two stores are wired together: whenever a
+        // receipt is deleted, drop any purchases tied to it too, so no UI
+        // call site has to remember to make both calls itself.
+        store.onReceiptDeleted = { [productStore] receiptID in
+            productStore.deletePurchases(forReceipt: receiptID)
+        }
+
+        _store = State(initialValue: store)
         _productStore = State(initialValue: productStore)
     }
 

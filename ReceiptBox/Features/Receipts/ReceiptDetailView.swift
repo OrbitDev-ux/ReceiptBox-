@@ -9,7 +9,6 @@ struct ReceiptDetailView: View {
     private let initialReceipt: Receipt
 
     @Environment(ReceiptStore.self) private var store
-    @Environment(ProductStore.self) private var productStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var isShowingEditSheet = false
@@ -85,7 +84,6 @@ struct ReceiptDetailView: View {
         ) {
             Button("삭제", role: .destructive) {
                 store.delete(receipt)
-                productStore.deletePurchases(forReceipt: receipt.id)
             }
             .accessibilityIdentifier("receiptDetail.confirmDeleteButton")
             Button("취소", role: .cancel) {}

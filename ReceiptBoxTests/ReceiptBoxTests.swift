@@ -681,10 +681,9 @@ struct ReceiptBoxTests {
     }
 
     @Test func deletingAReceiptCleansUpItsLinkedPurchases() throws {
-        // Mirrors what ReceiptDetailView/ReceiptsView do on delete: remove
-        // the receipt from ReceiptStore, then tell ProductStore to drop any
-        // purchases tied to it, since `Purchase.receiptID` has no SwiftData
-        // relationship to cascade this automatically.
+        // Exercises ProductStore.deletePurchases(forReceipt:) directly,
+        // called the same way ReceiptStore's onReceiptDeleted hook calls it
+        // (see makeWiredStores() below for the hook itself).
         let receiptStore = try makeInMemoryStore()
         let productStore = try makeInMemoryProductStore()
         let product = productStore.createProduct(Product(barcode: "8801234567890", name: "코카콜라 제로"))
@@ -719,6 +718,226 @@ struct ReceiptBoxTests {
 
         #expect(productStore.products.isEmpty)
         #expect(productStore.purchases(forProduct: product.id).isEmpty)
+    }
+
+    // MARK: - Receipt deletion cascade (P0-1 data integrity)
+    //
+    // These exercise ReceiptStore.onReceiptDeleted, the single hook
+    // RootTabView wires to ProductStore.deletePurchases(forReceipt:) so no
+    // UI call site has to remember to make two calls on delete. Every test
+    // below calls only `receiptStore.delete(...)` — never ProductStore's
+    // cleanup directly — to prove the wiring itself is what guarantees no
+    // orphaned Purchase survives.
+
+    /// Wires the two stores exactly the way RootTabView does, so these tests
+    /// exercise the real cascade path rather than re-deriving it.
+    private func makeWiredStores() throws -> (receiptStore: ReceiptStore, productStore: ProductStore) {
+        let receiptStore = try makeInMemoryStore()
+        let productStore = try makeInMemoryProductStore()
+        receiptStore.onReceiptDeleted = { [productStore] receiptID in
+            productStore.deletePurchases(forReceipt: receiptID)
+        }
+        return (receiptStore, productStore)
+    }
+
+    @Test func testA_deletingAReceiptRemovesItsLinkedPurchaseThroughTheHookAlone() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let product = productStore.createProduct(Product(barcode: "8801234567890", name: "코카콜라 제로"))
+
+        let receipt = Receipt(
+            merchantName: "세븐일레븐",
+            date: .now,
+            totalAmount: 1900,
+            category: .grocery,
+            paymentMethod: .card,
+            items: [ReceiptItem(name: "코카콜라 제로", unitPrice: 1900)]
+        )
+        let linked = ReceiptProductLinker.linkedReceipt(receipt, existingProducts: productStore.products)
+        receiptStore.add(linked)
+        productStore.syncPurchases(for: linked)
+        #expect(productStore.purchases(forProduct: product.id).count == 1)
+
+        // Only the receipt-store delete is called — no manual ProductStore cleanup.
+        receiptStore.delete(linked)
+
+        #expect(!receiptStore.receipts.contains { $0.id == linked.id })
+        #expect(productStore.purchases(forProduct: product.id).isEmpty)
+        #expect(productStore.receiptIDs(forProduct: product.id).isEmpty)
+    }
+
+    @Test func testB_editingAndResavingAReceiptDoesNotDuplicateItsPurchase() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let product = productStore.createProduct(Product(barcode: "8801234567890", name: "신라면"))
+
+        let original = Receipt(
+            merchantName: "GS25",
+            date: Date(timeIntervalSince1970: 1_000_000),
+            totalAmount: 1200,
+            category: .grocery,
+            paymentMethod: .cash,
+            items: [ReceiptItem(name: "신라면", unitPrice: 1200)]
+        )
+        let linkedOriginal = ReceiptProductLinker.linkedReceipt(original, existingProducts: productStore.products)
+        receiptStore.add(linkedOriginal)
+        productStore.syncPurchases(for: linkedOriginal)
+        #expect(productStore.purchases(forProduct: product.id).count == 1)
+
+        // Same flow as ManualReceiptEntryView's `.edit` save path: rebuild
+        // the receipt with the same id and updated fields, re-link, update,
+        // re-sync.
+        let edited = Receipt(
+            id: linkedOriginal.id,
+            merchantName: linkedOriginal.merchantName,
+            date: linkedOriginal.date,
+            totalAmount: 1300,
+            category: linkedOriginal.category,
+            paymentMethod: linkedOriginal.paymentMethod,
+            items: [ReceiptItem(name: "신라면", unitPrice: 1300)],
+            createdAt: linkedOriginal.createdAt,
+            updatedAt: .now
+        )
+        let linkedEdited = ReceiptProductLinker.linkedReceipt(edited, existingProducts: productStore.products)
+        receiptStore.update(linkedEdited)
+        productStore.syncPurchases(for: linkedEdited)
+
+        #expect(receiptStore.receipts.count == 1)
+        let purchases = productStore.purchases(forProduct: product.id)
+        #expect(purchases.count == 1)
+        #expect(purchases.first?.price == 1300)
+    }
+
+    @Test func testC_deletingAReceiptWithMultipleLinkedProductsRemovesAllOfThem() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let cola = productStore.createProduct(Product(barcode: "8801062971323", name: "코카콜라 제로"))
+        let water = productStore.createProduct(Product(barcode: "8809598720013", name: "제주삼다수"))
+
+        let receipt = Receipt(
+            merchantName: "CU",
+            date: .now,
+            totalAmount: 2700,
+            category: .grocery,
+            paymentMethod: .card,
+            items: [
+                ReceiptItem(name: "코카콜라 제로", unitPrice: 1900),
+                ReceiptItem(name: "제주삼다수", unitPrice: 800)
+            ]
+        )
+        let linked = ReceiptProductLinker.linkedReceipt(receipt, existingProducts: productStore.products)
+        receiptStore.add(linked)
+        productStore.syncPurchases(for: linked)
+        #expect(productStore.purchases(forProduct: cola.id).count == 1)
+        #expect(productStore.purchases(forProduct: water.id).count == 1)
+
+        receiptStore.delete(linked)
+
+        #expect(productStore.purchases(forProduct: cola.id).isEmpty)
+        #expect(productStore.purchases(forProduct: water.id).isEmpty)
+    }
+
+    @Test func testD_deletingAReceiptWithNoLinkedProductDeletesCleanly() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let receipt = Receipt(
+            merchantName: "Kyobo Book Centre",
+            date: .now,
+            totalAmount: 21000,
+            category: .other,
+            paymentMethod: .card
+        )
+        receiptStore.add(receipt)
+        #expect(receiptStore.receipts.count == 1)
+
+        receiptStore.delete(receipt)
+
+        #expect(receiptStore.receipts.isEmpty)
+        #expect(productStore.purchases.isEmpty)
+    }
+
+    @Test func testE_deletingAReceiptDoesNotAffectPurchasesTiedToADifferentOrDanglingReceiptID() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let product = productStore.createProduct(Product(barcode: "8801121962045", name: "새우깡"))
+
+        let keptReceipt = Receipt(
+            merchantName: "GS25",
+            date: .now,
+            totalAmount: 1500,
+            category: .grocery,
+            paymentMethod: .cash,
+            items: [ReceiptItem(name: "새우깡", unitPrice: 1500)]
+        )
+        let linkedKept = ReceiptProductLinker.linkedReceipt(keptReceipt, existingProducts: productStore.products)
+        receiptStore.add(linkedKept)
+        productStore.syncPurchases(for: linkedKept)
+
+        // A purchase whose receiptID doesn't correspond to any Receipt that
+        // ever existed in this store — e.g. leftover from a previous
+        // install, or a future bug elsewhere. Deleting an unrelated,
+        // real receipt must not touch it.
+        let danglingReceiptID = UUID()
+        productStore.addPurchase(Purchase(productID: product.id, price: 1500, receiptID: danglingReceiptID))
+        #expect(productStore.purchases(forProduct: product.id).count == 2)
+
+        let toDelete = Receipt(
+            merchantName: "세븐일레븐",
+            date: .now,
+            totalAmount: 1600,
+            category: .grocery,
+            paymentMethod: .card,
+            items: [ReceiptItem(name: "새우깡", unitPrice: 1600)]
+        )
+        let linkedToDelete = ReceiptProductLinker.linkedReceipt(toDelete, existingProducts: productStore.products)
+        receiptStore.add(linkedToDelete)
+        productStore.syncPurchases(for: linkedToDelete)
+        #expect(productStore.purchases(forProduct: product.id).count == 3)
+
+        receiptStore.delete(linkedToDelete)
+
+        let remaining = productStore.purchases(forProduct: product.id)
+        #expect(remaining.count == 2)
+        #expect(remaining.contains { $0.receiptID == linkedKept.id })
+        #expect(remaining.contains { $0.receiptID == danglingReceiptID })
+        #expect(!remaining.contains { $0.receiptID == linkedToDelete.id })
+    }
+
+    @Test func analyticsAndPriceHistoryReflectOnlyRemainingDataAfterReceiptDeletion() throws {
+        let (receiptStore, productStore) = try makeWiredStores()
+        let cola = productStore.createProduct(Product(barcode: "8801062971323", name: "코카콜라 제로"))
+
+        let cuReceipt = Receipt(
+            merchantName: "CU 신촌점",
+            date: .now,
+            totalAmount: 1900,
+            category: .grocery,
+            paymentMethod: .card,
+            items: [ReceiptItem(name: "코카콜라 제로", unitPrice: 1900)]
+        )
+        let linkedCU = ReceiptProductLinker.linkedReceipt(cuReceipt, existingProducts: productStore.products)
+        receiptStore.add(linkedCU)
+        productStore.syncPurchases(for: linkedCU)
+
+        let gsReceipt = Receipt(
+            merchantName: "GS25",
+            date: .now,
+            totalAmount: 6800,
+            category: .cafe,
+            paymentMethod: .card
+        )
+        receiptStore.add(gsReceipt)
+
+        // Sanity check before deletion: both merchants show up, and the
+        // product has one recorded purchase.
+        #expect(StoreAnalytics.summarize(receiptStore.receipts).contains { $0.name == "CU 신촌점" })
+        #expect(StoreAnalytics.summarize(receiptStore.receipts).contains { $0.name == "GS25" })
+        #expect(PriceHistorySummary.make(from: productStore.purchases(forProduct: cola.id)).purchaseCount == 1)
+
+        receiptStore.delete(linkedCU)
+
+        let storesAfterDelete = StoreAnalytics.summarize(receiptStore.receipts)
+        #expect(!storesAfterDelete.contains { $0.name == "CU 신촌점" })
+        #expect(storesAfterDelete.contains { $0.name == "GS25" })
+
+        let historyAfterDelete = PriceHistorySummary.make(from: productStore.purchases(forProduct: cola.id))
+        #expect(historyAfterDelete.purchaseCount == 0)
+        #expect(historyAfterDelete.recentPrice == nil)
     }
 
     // MARK: - Store analytics (Analytics "자주 찾은 상점")

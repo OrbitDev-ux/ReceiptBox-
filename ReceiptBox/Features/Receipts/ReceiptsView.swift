@@ -56,7 +56,6 @@ struct ReceiptsView: View {
                 Button("삭제", role: .destructive) {
                     if let receipt = pendingDeleteReceipt {
                         store.delete(receipt)
-                        productStore.deletePurchases(forReceipt: receipt.id)
                     }
                     pendingDeleteReceipt = nil
                 }

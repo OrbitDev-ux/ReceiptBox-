@@ -17,6 +17,14 @@ final class ReceiptStore {
     private(set) var receipts: [Receipt] = []
     private let modelContext: ModelContext
 
+    /// Invoked with a receipt's id right after it's deleted. `Purchase` has
+    /// no SwiftData relationship back to `Receipt` (see `Purchase.receiptID`),
+    /// so nothing cascades that deletion automatically — this is the single
+    /// hook the app wires (in `RootTabView`) to `ProductStore.deletePurchases
+    /// (forReceipt:)`, so every deletion path funnels through here instead of
+    /// each call site having to remember to clean up `ProductStore` itself.
+    var onReceiptDeleted: ((UUID) -> Void)?
+
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
         reload()
@@ -66,6 +74,7 @@ final class ReceiptStore {
         modelContext.delete(entity)
         save()
         reload()
+        onReceiptDeleted?(id)
     }
 
     // MARK: - Private
