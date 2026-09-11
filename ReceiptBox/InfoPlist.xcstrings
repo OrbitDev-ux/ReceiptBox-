@@ -1,0 +1,23 @@
+{
+  "sourceLanguage" : "ko",
+  "strings" : {
+    "NSCameraUsageDescription" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ReceiptBox uses your camera to scan receipts and product barcodes so you can log purchases without typing everything in by hand."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ReceiptBox가 카메라로 영수증과 바코드를 스캔할 수 있도록 허용해주세요. 내용을 직접 입력하지 않아도 자동으로 기록할 수 있어요."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

@@ -2,40 +2,127 @@
 //  ReceiptBoxUITests.swift
 //  ReceiptBoxUITests
 //
-//  Created by ys.kim's mac book neo  on 9/10/26.
+//  Covers the core user flows end to end against the real app (real
+//  SwiftData persistence, real navigation) — everything that doesn't need
+//  camera or barcode hardware, which the simulator can't provide reliably.
+//  Locale-independent by construction: tab bar items are found positionally
+//  and screens reached via custom controls use accessibilityIdentifiers
+//  (see the views under Features/) rather than matching localized button
+//  text, so these pass regardless of the simulator's system language.
+//
+//  The app's SwiftData store persists on disk across runs (this isn't an
+//  in-memory test target), so tests that create data clean up after
+//  themselves rather than assuming a pristine, empty app.
 //
 
 import XCTest
 
 final class ReceiptBoxUITests: XCTestCase {
-
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
-        continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
+    private enum Tab {
+        static let home = 0
+        static let scan = 1
+        static let analytics = 2
+        static let settings = 3
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+    override func setUpWithError() throws {
+        continueAfterFailure = false
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testHomeDisplaysCoreUIOnLaunch() throws {
         let app = XCUIApplication()
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        XCTAssertTrue(app.staticTexts["ReceiptBox"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.tabBars.buttons.count, 4)
+    }
+
+    @MainActor
+    func testNavigatingToReceiptsAndSearchingForSeededData() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let seeAllButton = app.buttons["home.seeAllButton"]
+        XCTAssertTrue(seeAllButton.waitForExistence(timeout: 5))
+        seeAllButton.tap()
+
+        let searchField = app.searchFields.firstMatch
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5))
+        searchField.tap()
+        searchField.typeText("Starbucks")
+
+        // Seeded on first launch (SampleData.receipts) and never deleted by
+        // any other test, so this should always be findable.
+        let starbucksResult = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Starbucks")
+        ).firstMatch
+        XCTAssertTrue(starbucksResult.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testAddingAManualReceiptThenViewingAndDeletingIt() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let merchantName = "UITest Merchant \(Int(Date().timeIntervalSince1970))"
+
+        // Home -> Add -> Manual Entry
+        let addButton = app.buttons["home.addReceiptButton"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 5))
+        addButton.tap()
+
+        let manualOption = app.buttons["addReceipt.manualOption"]
+        XCTAssertTrue(manualOption.waitForExistence(timeout: 5))
+        manualOption.tap()
+
+        let merchantField = app.textFields["manualEntry.merchantField"]
+        XCTAssertTrue(merchantField.waitForExistence(timeout: 5))
+        merchantField.tap()
+        merchantField.typeText(merchantName)
+
+        let totalField = app.textFields["manualEntry.totalField"]
+        XCTAssertTrue(totalField.exists)
+        totalField.tap()
+        totalField.typeText("1234")
+
+        let saveButton = app.buttons["manualEntry.saveButton"]
+        XCTAssertTrue(saveButton.isEnabled)
+        saveButton.tap()
+
+        // Back on Home, the new receipt is the most recent -> visible without scrolling.
+        let newReceiptRow = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", merchantName)
+        ).firstMatch
+        XCTAssertTrue(newReceiptRow.waitForExistence(timeout: 5))
+        newReceiptRow.tap()
+
+        // Receipt Detail shows the merchant name as its navigation title.
+        XCTAssertTrue(app.navigationBars[merchantName].waitForExistence(timeout: 5))
+
+        // Delete it via the overflow menu, then confirm.
+        let moreButton = app.buttons["receiptDetail.moreButton"]
+        XCTAssertTrue(moreButton.waitForExistence(timeout: 5))
+        moreButton.tap()
+
+        let deleteMenuItem = app.buttons["receiptDetail.deleteMenuItem"]
+        XCTAssertTrue(deleteMenuItem.waitForExistence(timeout: 5))
+        deleteMenuItem.tap()
+
+        let confirmDeleteButton = app.buttons["receiptDetail.confirmDeleteButton"]
+        XCTAssertTrue(confirmDeleteButton.waitForExistence(timeout: 5))
+        confirmDeleteButton.tap()
+
+        // Deleting dismisses Receipt Detail (ReceiptDetailView watches the
+        // store and dismisses itself once its receipt is gone).
+        XCTAssertTrue(app.staticTexts["ReceiptBox"].waitForExistence(timeout: 5))
+        XCTAssertFalse(
+            app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", merchantName)).firstMatch.exists
+        )
     }
 
     @MainActor
     func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             XCUIApplication().launch()
         }
